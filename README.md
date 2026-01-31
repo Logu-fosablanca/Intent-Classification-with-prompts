@@ -65,9 +65,18 @@ Set environment variables to configure the LLM provider:
 - `LLM_MODEL_NAME`: `llama3` (default)
 - `LLM_API_KEY`: (Optional) Bearer token for authentication.
 
-Alternatively, pass these arguments directly to `IntentClassifier()`.
 
-Alternatively, pass these arguments directly to `IntentClassifier()`.
+## Running Examples
+
+You can run the provided examples directly from the root directory:
+
+```bash
+# Basic usage demo
+python examples/basic_usage.py
+
+# Full multi-agent interaction demo
+python examples/agent_demo.py
+```
 
 ## License
 

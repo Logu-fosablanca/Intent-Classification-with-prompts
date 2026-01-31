@@ -3,7 +3,8 @@ import logging
 import sys
 import os
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+
 from query_classifier.simple_agent import SimpleAgent
 from query_classifier.nlp_engine import IntentClassifier
 from banking_intents import INTENTS
@@ -17,9 +18,10 @@ nlp = IntentClassifier(intents=INTENTS)
 candidate_labels = ["sales", "support"]
 
 # Define Agents
-router = SimpleAgent("router", 8000)
-sales_agent = SimpleAgent("sales", 8001)
-support_agent = SimpleAgent("support", 8002)
+# Define Agents (Using new ports to avoid conflicts)
+router = SimpleAgent("router", 8010)
+sales_agent = SimpleAgent("sales", 8011)
+support_agent = SimpleAgent("support", 8012)
 
 # Router Logic
 @router.on_message("UserRequest")
@@ -35,9 +37,9 @@ async def handle_user_request(sender, payload):
     msg_payload = {"original_text": text, "intent": label, "confidence": score}
     
     if label == "sales":
-        await router.send("http://localhost:8001/submit", "TaskDispatch", msg_payload)
+        await router.send("http://localhost:8011/submit", "TaskDispatch", msg_payload)
     elif label == "support":
-        await router.send("http://localhost:8002/submit", "TaskDispatch", msg_payload)
+        await router.send("http://localhost:8012/submit", "TaskDispatch", msg_payload)
 
 # Worker Logic
 @sales_agent.on_message("TaskDispatch")
@@ -45,12 +47,12 @@ async def sales_handler(sender, payload):
     logger.info(f"Sales Agent working on: {payload['original_text']}")
     # Simulate response back to router or user? 
     # For A2A, maybe report back to router.
-    await sales_agent.send("http://localhost:8000/submit", "TaskResponse", {"status": "completed", "message": "Sales info sent"})
+    await sales_agent.send("http://localhost:8010/submit", "TaskResponse", {"status": "completed", "message": "Sales info sent"})
 
 @support_agent.on_message("TaskDispatch")
 async def support_handler(sender, payload):
     logger.info(f"Support Agent working on: {payload['original_text']}")
-    await support_agent.send("http://localhost:8000/submit", "TaskResponse", {"status": "completed", "message": "Ticket created"})
+    await support_agent.send("http://localhost:8010/submit", "TaskResponse", {"status": "completed", "message": "Ticket created"})
 
 @router.on_message("TaskResponse")
 async def router_handle_response(sender, payload):
