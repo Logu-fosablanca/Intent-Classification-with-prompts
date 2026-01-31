@@ -1,0 +1,7 @@
+uagents
+transformers
+torch
+langdetect
+ollama
+sentence-transformers
+numpy
