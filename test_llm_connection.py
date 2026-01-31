@@ -1,7 +1,7 @@
 
 import asyncio
 import ollama
-from src.config import LLM_MODEL_NAME, LLM_API_BASE
+from query_classifier.config import LLM_MODEL_NAME, LLM_API_BASE
 
 async def test_llm_connection():
     print(f"Testing LLM Connection...")

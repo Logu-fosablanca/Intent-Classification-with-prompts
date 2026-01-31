@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from src.simple_agent import SimpleAgent
+from query_classifier.simple_agent import SimpleAgent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

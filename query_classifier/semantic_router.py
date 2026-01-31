@@ -1,19 +1,22 @@
 
 import numpy as np
 import logging
-from src.intents_db import INTENTS
-from src.config import ROUTER_EMBEDDING_MODEL
+
+from query_classifier.config import ROUTER_EMBEDDING_MODEL
 
 logger = logging.getLogger(__name__)
 
 class SemanticRouter:
-    def __init__(self, model_name=ROUTER_EMBEDDING_MODEL):
-        self.intents = INTENTS
+    def __init__(self, intents: list, model_name=None):
+        self.intents = intents
         self.descriptions = [i['description'] for i in self.intents]
         self.model = None
         self.vectorizer = None
         self.tfidf_matrix = None
         
+        if not model_name:
+            model_name = ROUTER_EMBEDDING_MODEL
+            
         logger.info(f"Attempting to load embedding model: {model_name}...")
         try:
             from sentence_transformers import SentenceTransformer

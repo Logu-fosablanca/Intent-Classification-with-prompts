@@ -1,14 +1,15 @@
 import asyncio
 import logging
-from src.simple_agent import SimpleAgent
-from src.nlp_engine import IntentClassifier
+from query_classifier.simple_agent import SimpleAgent
+from query_classifier.nlp_engine import IntentClassifier
+from banking_intents import INTENTS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("System")
 
 # Initialize NLP Engine
-nlp = IntentClassifier()
+nlp = IntentClassifier(intents=INTENTS)
 candidate_labels = ["sales", "support"]
 
 # Define Agents

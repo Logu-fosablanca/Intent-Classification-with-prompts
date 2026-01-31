@@ -6,23 +6,42 @@ import ollama
 import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from src.semantic_router import SemanticRouter
-from src.config import LLM_MODEL_NAME, LANG_DETECT_MODEL, LLM_PROVIDER, LLM_API_BASE
+from query_classifier.semantic_router import SemanticRouter
+from query_classifier.config import LLM_MODEL_NAME, LANG_DETECT_MODEL, LLM_PROVIDER, LLM_API_BASE, LLM_API_KEY
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class IntentClassifier:
-    def __init__(self):
-        logger.info("Initializing Intent Classifier (Ollama + Semantic Router)...")
-        self.router = SemanticRouter()
-        self.ollama_model = LLM_MODEL_NAME
+    def __init__(self, intents: list, 
+                 llm_provider=LLM_PROVIDER,
+                 llm_model_name=LLM_MODEL_NAME,
+                 llm_base_url=LLM_API_BASE,
+                 llm_api_key=LLM_API_KEY,
+                 embedding_model=None,
+                 lang_detect_model=LANG_DETECT_MODEL):
+        
+        logger.info("Initializing Intent Classifier...")
+        
+        # Configuration
+        self.llm_provider = llm_provider
+        self.llm_model_name = llm_model_name
+        self.llm_base_url = llm_base_url
+        self.llm_api_key = llm_api_key
+        self.embedding_model = embedding_model
+        
+        # Initialize Router
+        # Pass embedding_model if provided, otherwise let Router use its default
+        if embedding_model:
+            self.router = SemanticRouter(intents=intents, model_name=embedding_model)
+        else:
+            self.router = SemanticRouter(intents=intents)
         
         # Load Language Detection Model
-        logger.info(f"Loading Language Detection Model ({LANG_DETECT_MODEL})...")
-        self.tokenizer = AutoTokenizer.from_pretrained(LANG_DETECT_MODEL)
-        self.lang_model = AutoModelForSequenceClassification.from_pretrained(LANG_DETECT_MODEL)
+        logger.info(f"Loading Language Detection Model ({lang_detect_model})...")
+        self.tokenizer = AutoTokenizer.from_pretrained(lang_detect_model)
+        self.lang_model = AutoModelForSequenceClassification.from_pretrained(lang_detect_model)
     
     def detect_language(self, text: str) -> str:
         try:
@@ -72,13 +91,20 @@ class IntentClassifier:
         
         try:
             # Use AsyncClient for non-blocking IO
-            if LLM_PROVIDER == "ollama":
-                client = ollama.AsyncClient(host=LLM_API_BASE)
+            # Use AsyncClient for non-blocking IO
+            if self.llm_provider == "ollama":
+                headers = {}
+                if self.llm_api_key:
+                    headers['Authorization'] = f"Bearer {self.llm_api_key}"
+                client = ollama.AsyncClient(host=self.llm_base_url, headers=headers)
             else:
-                logger.warning(f"Provider '{LLM_PROVIDER}' not explicitly handled. Defaulting to Ollama logic with base url: {LLM_API_BASE}")
-                client = ollama.AsyncClient(host=LLM_API_BASE)
+                logger.warning(f"Provider '{self.llm_provider}' not explicitly handled. Defaulting to Ollama logic with base url: {self.llm_base_url}")
+                headers = {}
+                if self.llm_api_key:
+                    headers['Authorization'] = f"Bearer {self.llm_api_key}"
+                client = ollama.AsyncClient(host=self.llm_base_url, headers=headers)
                 
-            response = await client.chat(model=self.ollama_model, messages=[{'role': 'user', 'content': prompt}])
+            response = await client.chat(model=self.llm_model_name, messages=[{'role': 'user', 'content': prompt}])
             content = response['message']['content']
             
             # Simple cleanup for JSON parsing
@@ -106,7 +132,7 @@ class IntentClassifier:
             """
             
             try:
-                verify_response = await client.chat(model=self.ollama_model, messages=[{'role': 'user', 'content': verify_prompt}])
+                verify_response = await client.chat(model=self.llm_model_name, messages=[{'role': 'user', 'content': verify_prompt}])
                 verify_content = verify_response['message']['content']
                 if "```json" in verify_content:
                     verify_content = verify_content.split("```json")[1].split("```")[0].strip()
