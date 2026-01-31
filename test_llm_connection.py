@@ -1,16 +1,16 @@
 
 import asyncio
 import ollama
-from src.config import LLM_MODEL_NAME, OLLAMA_BASE_URL
+from src.config import LLM_MODEL_NAME, LLM_API_BASE
 
 async def test_llm_connection():
     print(f"Testing LLM Connection...")
-    print(f"URL: {OLLAMA_BASE_URL}")
+    print(f"URL: {LLM_API_BASE}")
     print(f"Model: {LLM_MODEL_NAME}")
     
     try:
         # Initialize client with configured URL
-        client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+        client = ollama.AsyncClient(host=LLM_API_BASE)
         
         # 1. Test Connection / List Models
         print("\n[1/2] Checking connection & available models...")

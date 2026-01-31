@@ -7,7 +7,7 @@ import torch
 import numpy as np
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from src.semantic_router import SemanticRouter
-from src.config import LLM_MODEL_NAME, LANG_DETECT_MODEL, OLLAMA_BASE_URL
+from src.config import LLM_MODEL_NAME, LANG_DETECT_MODEL, LLM_PROVIDER, LLM_API_BASE
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -72,7 +72,12 @@ class IntentClassifier:
         
         try:
             # Use AsyncClient for non-blocking IO
-            client = ollama.AsyncClient(host=OLLAMA_BASE_URL)
+            if LLM_PROVIDER == "ollama":
+                client = ollama.AsyncClient(host=LLM_API_BASE)
+            else:
+                logger.warning(f"Provider '{LLM_PROVIDER}' not explicitly handled. Defaulting to Ollama logic with base url: {LLM_API_BASE}")
+                client = ollama.AsyncClient(host=LLM_API_BASE)
+                
             response = await client.chat(model=self.ollama_model, messages=[{'role': 'user', 'content': prompt}])
             content = response['message']['content']
             
