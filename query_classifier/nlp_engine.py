@@ -56,7 +56,7 @@ class IntentClassifier:
             logger.error(f"Language detection failed: {e}")
             return "unknown"
 
-    async def classify(self, text: str, candidate_labels: list = None):
+    async def classify(self, text: str, candidate_labels: list = None, conversation_history: list = None):
         loop = asyncio.get_running_loop()
         
         # 1. Start Language Detection (Independent Task)
@@ -71,8 +71,14 @@ class IntentClassifier:
         logger.info(f"Top 5 Semantic Matches: {[m['intent']['name'] for m in top_matches]}")
 
         # 3. LLM Classification (Reasoning)
+        history_context = ""
+        if conversation_history:
+             history_str = json.dumps(conversation_history, indent=2)
+             history_context = f"\nConversation History:\n{history_str}\n\nInstruction: Use the conversation history to Resolve ambiguity (e.g. pronouns like 'it', 'match', 'statement') or incomplete queries. The current query is a follow-up."
+
         prompt = f"""
         You are an intelligent intent classifier.
+        {history_context}
         User Query: "{text}"
         
         Below are the top 5 possible intents matching this query:
