@@ -180,10 +180,13 @@ class IntentClassifier:
             # 4. Verification (Simple Logic)
             verify_prompt = f"""
             Verify this intent classification:
+            {history_context}
             User Query: "{text}"
             Selected Intent: "{result['name']}"
             
-            Does this query functionally match the intent described?
+            Task:
+            Check if the query matches the intent, EITHER semantically OR as a valid follow-up/parameter refinement based on the history.
+            
             Return JSON:
             {{
                 "is_correct": true/false,
