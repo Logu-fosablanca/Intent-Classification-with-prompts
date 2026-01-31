@@ -21,7 +21,14 @@ async def test_llm_connection():
             models = models_response.get('models', [])
             print(f"[OK] Connection successful. Found {len(models)} models.")
             
-            model_names = [m.get('name') for m in models]
+            model_names = []
+            for m in models:
+                # Handle dictionary or object
+                if isinstance(m, dict):
+                    name = m.get('name') or m.get('model')
+                else:
+                    name = getattr(m, 'name', None) or getattr(m, 'model', None)
+                model_names.append(name)
             if LLM_MODEL_NAME in model_names or f"{LLM_MODEL_NAME}:latest" in model_names:
                 print(f"[OK] Configured model '{LLM_MODEL_NAME}' found on server.")
             else:
