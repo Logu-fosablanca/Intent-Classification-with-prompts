@@ -56,6 +56,53 @@ class IntentClassifier:
             logger.error(f"Language detection failed: {e}")
             return "unknown"
 
+    def _extract_json(self, content):
+        """Helper to robustly extract a JSON object containing 'name' or 'is_correct' from text."""
+        try:
+            # 1. Try cleaning markdown first
+            clean_content = content
+            if "```json" in content:
+                clean_content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                clean_content = content.split("```")[1].split("```")[0].strip()
+            
+            try:
+                return json.loads(clean_content)
+            except:
+                pass # Continue to brace scanning
+            
+            # 2. Search for all potential JSON objects
+            start_indices = [i for i, char in enumerate(content) if char == '{']
+            
+            for start_idx in start_indices:
+                try:
+                    depth = 0
+                    end_idx = -1
+                    for i, char in enumerate(content[start_idx:], start=start_idx):
+                        if char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end_idx = i
+                                break
+                    
+                    if end_idx != -1:
+                        candidate_str = content[start_idx:end_idx+1]
+                        candidate_json = json.loads(candidate_str)
+                        if isinstance(candidate_json, dict):
+                             # Accept if it looks like a classification result OR verification result
+                             if 'name' in candidate_json or 'is_correct' in candidate_json:
+                                return candidate_json
+                except:
+                    continue
+            
+            raise ValueError("No valid JSON object found")
+
+        except Exception as e:
+            # logger.error(f"JSON extraction error: {e}") 
+            raise e
+
     async def classify(self, text: str, candidate_labels: list = None, conversation_history: list = None):
         loop = asyncio.get_running_loop()
         
@@ -74,24 +121,31 @@ class IntentClassifier:
         history_context = ""
         if conversation_history:
              history_str = json.dumps(conversation_history, indent=2)
-             history_context = f"\nConversation History:\n{history_str}\n\nInstruction: Use the conversation history to Resolve ambiguity (e.g. pronouns like 'it', 'match', 'statement') or incomplete queries. The current query is a follow-up."
+             history_context = (
+                 f"\nConversation History:\n{history_str}\n\n"
+                 "CRITICAL INSTRUCTION: Analyze if the 'User Query' is a follow-up, refinement, or continuation of the previous intent in the history.\n"
+                 "- IF it is a continuation (e.g., providing dates, saying 'yes/no', asking 'what about...?'), YOU MUST CLASSIFY IT AS THE SAME INTENT AS THE PREVIOUS TURN.\n"
+                 "- Only choose a NEW intent if the user clearly changes the topic."
+             )
 
         prompt = f"""
         You are an intelligent intent classifier.
         {history_context}
         User Query: "{text}"
         
-        Below are the top 5 possible intents matching this query:
+        Below are the top 5 possible semantic matches for this specific query (ignoring context):
         {candidates_str}
         
-        Analyze the query and select the BEST matching intent from the list.
-        If none match well, choose 'general_irrelevant'.
+        Task:
+        1. Check the Conversation History (if exists).
+        2. Decide if this is a CONTINUATION of the active intent or a NEW request.
+        3. Select the BEST intent.
         
-        Return ONLY a JSON object with this format:
+        Return ONLY a JSON object:
         {{
             "name": "intent_name",
             "confidence": 0.95,
-            "reasoning": "Brief explanation"
+            "reasoning": "Explain why it is a continuation or a new intent."
         }}
         """
         
@@ -117,30 +171,11 @@ class IntentClassifier:
             content = response['message']['content']
             logger.info(f"LLM Response: {content}")
             
-            # Simple cleanup for JSON parsing
-            # Robust JSON extraction
             try:
-                # 1. Try cleaning markdown first
-                clean_content = content
-                if "```json" in content:
-                    clean_content = content.split("```json")[1].split("```")[0].strip()
-                elif "```" in content:
-                    clean_content = content.split("```")[1].split("```")[0].strip()
-                
-                result = json.loads(clean_content)
-            except json.JSONDecodeError:
-                # 2. Fallback: Find first '{' and last '}'
-                try:
-                    start_idx = content.find('{')
-                    end_idx = content.rfind('}')
-                    if start_idx != -1 and end_idx != -1:
-                        json_str = content[start_idx:end_idx+1]
-                        result = json.loads(json_str)
-                    else:
-                        raise ValueError("No JSON object found")
-                except Exception as e:
-                    logger.error(f"Failed to extract JSON from content: {content[:100]}... Error: {e}")
-                    raise e
+                result = self._extract_json(content)
+            except Exception as e:
+                 logger.error(f"Failed to extract JSON from content: {content[:100]}... Error: {e}")
+                 raise e
             
             # 4. Verification (Simple Logic)
             verify_prompt = f"""
@@ -162,12 +197,8 @@ class IntentClassifier:
                 verify_response = await client.chat(model=self.llm_model_name, messages=[{'role': 'user', 'content': verify_prompt}])
                 verify_content = verify_response['message']['content']
                 logger.info(f"Verification Response: {verify_content}")
-                if "```json" in verify_content:
-                    verify_content = verify_content.split("```json")[1].split("```")[0].strip()
-                elif "```" in verify_content:
-                    verify_content = verify_content.split("```")[1].split("```")[0].strip()
                 
-                verify_result = json.loads(verify_content)
+                verify_result = self._extract_json(verify_content)
                 logger.info(f"Verification Result: {verify_result}")
                 
                 if not verify_result['is_correct']:

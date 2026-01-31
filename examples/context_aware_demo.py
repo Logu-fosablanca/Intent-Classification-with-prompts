@@ -30,7 +30,7 @@ async def main():
     
     # Update history
     history.append({"role": "user", "content": q1})
-    history.append({"role": "assistant", "intent_classified": intent1})
+    history.append({"role": "assistant", "content":"please give date","intent_classified": intent1})
     
     # 2. Follow-up Query (Ambiguous)
     q2 = "for last 6 months" 
