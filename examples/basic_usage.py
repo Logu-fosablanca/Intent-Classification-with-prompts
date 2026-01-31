@@ -1,10 +1,14 @@
 
 import asyncio
+
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from query_classifier.nlp_engine import IntentClassifier
+try:
+    from query_classifier.nlp_engine import IntentClassifier
+except ImportError:
+    # Fallback for running locally without install
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+    from query_classifier.nlp_engine import IntentClassifier
 from banking_intents import INTENTS
 
 async def main():
@@ -20,9 +24,10 @@ async def main():
     
     # 2. Define queries to test
     queries = [
-        "I lost my card, can you block it?",
-        "What is the status of my loan application?",
-        "I need to talk to a human agent"
+        # "I lost my card, can you block it?",
+        # "What is the status of my loan application?",
+        # "I need to talk to a human agent",
+        "Mera Account statement chagiye"
     ]
     
     # 3. Classify

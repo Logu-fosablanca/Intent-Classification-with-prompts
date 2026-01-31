@@ -104,17 +104,37 @@ class IntentClassifier:
                     headers['Authorization'] = f"Bearer {self.llm_api_key}"
                 client = ollama.AsyncClient(host=self.llm_base_url, headers=headers)
                 
+                client = ollama.AsyncClient(host=self.llm_base_url, headers=headers)
+                
+            logger.info(f"Sending LLM Reasoning Request for query: '{text}'")
             response = await client.chat(model=self.llm_model_name, messages=[{'role': 'user', 'content': prompt}])
             content = response['message']['content']
+            logger.info(f"LLM Response: {content}")
             
             # Simple cleanup for JSON parsing
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
+            # Robust JSON extraction
+            try:
+                # 1. Try cleaning markdown first
+                clean_content = content
+                if "```json" in content:
+                    clean_content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    clean_content = content.split("```")[1].split("```")[0].strip()
                 
-
-            result = json.loads(content)
+                result = json.loads(clean_content)
+            except json.JSONDecodeError:
+                # 2. Fallback: Find first '{' and last '}'
+                try:
+                    start_idx = content.find('{')
+                    end_idx = content.rfind('}')
+                    if start_idx != -1 and end_idx != -1:
+                        json_str = content[start_idx:end_idx+1]
+                        result = json.loads(json_str)
+                    else:
+                        raise ValueError("No JSON object found")
+                except Exception as e:
+                    logger.error(f"Failed to extract JSON from content: {content[:100]}... Error: {e}")
+                    raise e
             
             # 4. Verification (Simple Logic)
             verify_prompt = f"""
@@ -132,8 +152,10 @@ class IntentClassifier:
             """
             
             try:
+                logger.info("Sending LLM Verification Request...")
                 verify_response = await client.chat(model=self.llm_model_name, messages=[{'role': 'user', 'content': verify_prompt}])
                 verify_content = verify_response['message']['content']
+                logger.info(f"Verification Response: {verify_content}")
                 if "```json" in verify_content:
                     verify_content = verify_content.split("```json")[1].split("```")[0].strip()
                 elif "```" in verify_content:
