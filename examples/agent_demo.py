@@ -3,10 +3,7 @@ import logging
 import sys
 import os
 
-
-
-from query_classifier.simple_agent import SimpleAgent
-from query_classifier.nlp_engine import IntentClassifier
+from query_classifier import SimpleAgent, IntentClassifier
 from banking_intents import INTENTS
 
 # Configure logging

@@ -1,14 +1,7 @@
 
 import asyncio
 
-import sys
-import os
-try:
-    from query_classifier.nlp_engine import IntentClassifier
-except ImportError:
-    # Fallback for running locally without install
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from query_classifier.nlp_engine import IntentClassifier
+from query_classifier import IntentClassifier
 from banking_intents import INTENTS
 
 async def main():

@@ -1,13 +1,6 @@
 import asyncio
 import os
-import sys
-
-# Standard robust import
-try:
-    from query_classifier.nlp_engine import IntentClassifier
-except ImportError:
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from query_classifier.nlp_engine import IntentClassifier
+from query_classifier import IntentClassifier
 
 # Define simple banking intents
 intents = [
