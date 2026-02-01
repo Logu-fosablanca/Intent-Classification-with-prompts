@@ -3,9 +3,9 @@ from setuptools import setup, find_packages
 
 setup(
     name="query_classifier",
-    version="0.1.0",
+    version="0.1.1",
     description="A generic intent classification library using Semantic Routing and LLMs",
-    author="Antigravity",
+    author="Logu",
     packages=find_packages(),
     install_requires=[
         "numpy",
