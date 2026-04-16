@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "query_classifier"
+version = "0.1.2"
+description = "A generic intent classification library using Semantic Routing and LLMs"
+authors = [
+  { name="Logu" },
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "sentence-transformers",
+    "transformers",
+    "torch",
+    "ollama",
+    "uagents",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["query_classifier*"]
+exclude = ["venv*", "dist*", "build*"]

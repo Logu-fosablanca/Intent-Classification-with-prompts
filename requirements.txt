@@ -5,3 +5,5 @@ langdetect
 ollama
 sentence-transformers
 numpy
+pytest
+pytest-asyncio

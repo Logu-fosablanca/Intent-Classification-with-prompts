@@ -35,3 +35,82 @@ INTENTS = [
     {"name": "support_mobile_app_help", "description": "User needs help using the mobile banking app."},
     {"name": "support_security_alert", "description": "User wants to report suspicious activity."}
 ]
+
+# ---------------------------------------------------------------------------
+# Hierarchical intent structure (REIC coarse-to-fine classification)
+#
+# Each category has:
+#   description : used by the coarse-level SemanticRouter to match the query
+#   intents     : list of intent names that belong to this category
+#
+# The classifier first picks the top-N categories, then does fine-grained
+# routing only within those intents — drastically reducing the search space.
+# ---------------------------------------------------------------------------
+INTENT_HIERARCHY = {
+    "accounts": {
+        "description": (
+            "Managing bank accounts: checking balance, viewing statements, "
+            "opening or closing accounts, updating personal details like address or phone."
+        ),
+        "intents": [
+            "account_check_balance",
+            "account_statement_request",
+            "account_open_new",
+            "account_close_request",
+            "account_update_details",
+        ],
+    },
+    "transactions": {
+        "description": (
+            "Money movement and payment activity: transferring funds, paying bills, "
+            "viewing transaction history, disputing a charge, setting up recurring payments."
+        ),
+        "intents": [
+            "transaction_history",
+            "transaction_transfer_funds",
+            "transaction_pay_bill",
+            "transaction_dispute",
+            "transaction_recurring_setup",
+        ],
+    },
+    "cards": {
+        "description": (
+            "Debit and credit card management: blocking or unblocking a card, "
+            "requesting a new card, changing PIN, adjusting spending or withdrawal limits."
+        ),
+        "intents": [
+            "card_block",
+            "card_unblock",
+            "card_new_request",
+            "card_pin_change",
+            "card_limit_change",
+        ],
+    },
+    "loans_and_credit": {
+        "description": (
+            "Borrowing and creditworthiness: applying for a personal or home loan, "
+            "checking loan application status, making a loan repayment, "
+            "checking credit score, inquiring about mortgage options."
+        ),
+        "intents": [
+            "loan_apply",
+            "loan_status_check",
+            "loan_repayment",
+            "credit_score_check",
+            "mortgage_inquiry",
+        ],
+    },
+    "support": {
+        "description": (
+            "Customer support and assistance: reaching a human agent, finding a branch or ATM, "
+            "getting help with the mobile banking app, reporting suspicious or fraudulent activity."
+        ),
+        "intents": [
+            "support_contact_human",
+            "support_branch_locator",
+            "support_atm_locator",
+            "support_mobile_app_help",
+            "support_security_alert",
+        ],
+    },
+}
