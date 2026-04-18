@@ -20,7 +20,7 @@ import logging
 import numpy as np
 from typing import List, Dict, Optional
 
-from query_classifier.config import ROUTER_EMBEDDING_MODEL
+from query_classifier.config import ROUTER_EMBEDDING_MODEL, RAG_PER_INTENT_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -181,9 +181,18 @@ class ExampleStore:
     # Retrieval API
     # ------------------------------------------------------------------
 
-    def retrieve_from_embedding(self, query_emb: np.ndarray, k: int = 6) -> List[Dict]:
+    def retrieve_from_embedding(
+        self,
+        query_emb: np.ndarray,
+        k: int = 6,
+        per_intent_limit: Optional[int] = None,
+    ) -> List[Dict]:
         """
         Retrieve top-k most similar examples using a pre-computed query embedding.
+
+        Implements the diversity control from REIC: at most `per_intent_limit`
+        examples per intent are returned, preventing a single dominant intent from
+        monopolising the few-shot evidence shown to the LLM.
 
         The caller passes the context-enriched RAG embedding (built from last user
         turns + current query). Both single-turn and multi-turn stored examples
@@ -193,7 +202,10 @@ class ExampleStore:
             query_emb: Pre-computed embedding (same model as encoder).
                        Should be encode(last_user_turns + " " + current_text)
                        when conversation history exists.
-            k: Number of examples to return.
+            k: Maximum number of examples to return.
+            per_intent_limit: Maximum examples from any single intent.
+                              Defaults to RAG_PER_INTENT_LIMIT from config (2).
+                              Set to None or a large number to disable.
 
         Returns:
             List of {"text": str, "intent": str, "score": float} sorted by
@@ -202,23 +214,32 @@ class ExampleStore:
         if self._embeddings is None or len(self._texts) == 0:
             return []
 
+        if per_intent_limit is None:
+            per_intent_limit = RAG_PER_INTENT_LIMIT
+
         query_emb = np.array(query_emb, dtype=np.float32)
         norm_q = np.linalg.norm(query_emb) + 1e-8
 
         norms = np.linalg.norm(self._embeddings, axis=1) + 1e-8
         scores = self._embeddings.dot(query_emb) / (norms * norm_q)
 
-        top_k = min(k, len(self._texts))
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        results: List[Dict] = []
+        intent_counts: Dict[str, int] = {}
 
-        return [
-            {
-                "text": self._texts[idx],
-                "intent": self._intents[idx],
-                "score": float(scores[idx]),
-            }
-            for idx in top_indices
-        ]
+        for idx in np.argsort(scores)[::-1]:
+            intent = self._intents[idx]
+            if intent_counts.get(intent, 0) >= per_intent_limit:
+                continue
+            intent_counts[intent] = intent_counts.get(intent, 0) + 1
+            results.append({
+                "text":   self._texts[idx],
+                "intent": intent,
+                "score":  float(scores[idx]),
+            })
+            if len(results) >= k:
+                break
+
+        return results
 
     def retrieve(self, query: str, k: int = 6) -> List[Dict]:
         """

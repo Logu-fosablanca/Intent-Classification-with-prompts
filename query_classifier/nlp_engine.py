@@ -10,7 +10,7 @@ from query_classifier.semantic_router import SemanticRouter
 from query_classifier.config import (
     LLM_MODEL_NAME, LANG_DETECT_MODEL, LLM_PROVIDER,
     LLM_API_BASE, LLM_API_KEY, RAG_TOP_K_EXAMPLES, EXAMPLE_STORE_PATH,
-    TURN_MODE,
+    TURN_MODE, RAG_CONFIDENCE_BLEND,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -730,7 +730,23 @@ class IntentClassifier:
         intent_name = result.get("name", top_matches[0]["intent"]["name"])
         llm_confidence = float(result.get("confidence", 0.5))
 
-        # 9. Confidence gate: low retrieval similarity signals uncharted territory
+        # 9. Confidence blend: mix LLM confidence with top retrieval similarity.
+        #    Grounds the score in empirical evidence — if retrieval is weak, the
+        #    blended score reflects that even when the LLM is over-confident.
+        if rag_examples and RAG_CONFIDENCE_BLEND > 0:
+            top_retrieval_score = float(rag_examples[0]["score"])
+            blended = (
+                (1.0 - RAG_CONFIDENCE_BLEND) * llm_confidence
+                + RAG_CONFIDENCE_BLEND * top_retrieval_score
+            )
+            logger.info(
+                f"Confidence blend: LLM={llm_confidence:.2f}, "
+                f"retrieval={top_retrieval_score:.2f}, "
+                f"blended={blended:.2f} (α={RAG_CONFIDENCE_BLEND})"
+            )
+            llm_confidence = blended
+
+        # 10. Confidence gate: low retrieval similarity signals uncharted territory
         if rag_examples and rag_examples[0]["score"] < 0.35:
             logger.warning(
                 f"Low retrieval similarity ({rag_examples[0]['score']:.2f}) — "
@@ -738,7 +754,7 @@ class IntentClassifier:
             )
             llm_confidence = min(llm_confidence, 0.55)
 
-        # 10. Optional verification (opt-in, disabled by default)
+        # 11. Optional verification (opt-in, disabled by default)
         if verify:
             verify_prompt = self._build_verify_prompt(
                 text, intent_name, rag_examples, conversation_history

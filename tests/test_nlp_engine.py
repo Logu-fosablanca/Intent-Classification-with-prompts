@@ -549,3 +549,66 @@ class TestClassify:
         clf.enable_lang_detect = False
         result = clf.detect_language("hello")
         assert result == "unknown"
+
+    def test_confidence_blend_applied_when_rag_examples_present(self, encoder):
+        """
+        RAG_CONFIDENCE_BLEND mixes LLM confidence with top retrieval score.
+        blended = (1 - α) * llm_conf + α * retrieval_score
+        """
+        import query_classifier.nlp_engine as engine_mod
+        store = _make_store(encoder)
+        clf = _make_classifier(
+            mode=ClassificationMode.FLAT_RAG,
+            turn_mode=TurnMode.SINGLE,
+            example_store=store,
+            encoder=encoder,
+        )
+        self._patch_llm(clf, _make_mock_llm_response("check_balance", 0.9))
+
+        # Force a known retrieval score so we can verify the blend math
+        retrieval_score = 0.6
+        clf._get_rag_examples = MagicMock(
+            return_value=[{"text": "check balance", "intent": "check_balance", "score": retrieval_score}]
+        )
+
+        alpha = engine_mod.RAG_CONFIDENCE_BLEND  # from config (0.25 default)
+        expected_blended = (1.0 - alpha) * 0.9 + alpha * retrieval_score
+
+        _, conf, _ = self._run(clf.classify("check my balance"))
+        assert abs(conf - expected_blended) < 0.01, (
+            f"Expected blended confidence ≈{expected_blended:.3f}, got {conf:.3f}"
+        )
+
+    def test_confidence_blend_not_applied_without_rag_examples(self, encoder):
+        """Without RAG examples, LLM confidence passes through unchanged."""
+        import query_classifier.nlp_engine as engine_mod
+        clf = _make_classifier(mode=ClassificationMode.FLAT, encoder=encoder)
+        self._patch_llm(clf, _make_mock_llm_response("check_balance", 0.88))
+
+        # No RAG examples in FLAT mode
+        _, conf, _ = self._run(clf.classify("check my balance"))
+        assert conf == 0.88  # exact LLM value, no blending
+
+    def test_confidence_blend_then_gate_order(self, encoder):
+        """
+        Blend must apply BEFORE the confidence gate so that gate operates on
+        the already-blended value, not the raw LLM value.
+        LLM=0.99, retrieval=0.10 (low signal) → gate caps at 0.55.
+        """
+        import query_classifier.nlp_engine as engine_mod
+        store = _make_store(encoder)
+        clf = _make_classifier(
+            mode=ClassificationMode.FLAT_RAG,
+            turn_mode=TurnMode.SINGLE,
+            example_store=store,
+            encoder=encoder,
+        )
+        self._patch_llm(clf, _make_mock_llm_response("check_balance", 0.99))
+        low_score = 0.10
+        clf._get_rag_examples = MagicMock(
+            return_value=[{"text": "xyz", "intent": "check_balance", "score": low_score}]
+        )
+
+        _, conf, _ = self._run(clf.classify("obscure query"))
+        # Gate threshold is 0.35; low_score=0.10 triggers gate → cap at 0.55
+        assert conf <= 0.55

@@ -18,9 +18,11 @@ import os
 # Make the library importable when running from the repo root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import asyncio
 import hashlib
 import json
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -31,10 +33,30 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from query_classifier.config import RAG_CONFIDENCE_BLEND
+from web.db import (
+    SESSION_TTL,
+    append_turn,
+    cleanup_loop,
+    create_session,
+    get_history,
+    init_db,
+    session_exists,
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Intent Classifier — REIC Demo")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    task = asyncio.create_task(cleanup_loop())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Intent Classifier — REIC Demo", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -70,7 +92,8 @@ class ClassifyRequest(BaseModel):
     intents: List[IntentDef]
     hierarchy: Optional[Dict[str, HierarchyCategoryDef]] = None
     examples: List[ExampleDef] = []
-    conversation_history: List[Dict[str, Any]] = []
+    conversation_history: List[Dict[str, Any]] = []  # fallback when no session_id
+    session_id: Optional[str] = None               # DB-backed session
     llm_base_url: str = "https://api.openai.com"
     llm_model_name: str = "gpt-4o-mini"
     llm_api_key: str = ""
@@ -83,6 +106,7 @@ class ClassifyResponse(BaseModel):
     language: str = "unknown"
     rag_examples: List[dict] = []
     matched_categories: List[str] = []
+    session_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -218,14 +242,32 @@ async def classify(req: ClassifyRequest):
 
         is_multi = req.turn_mode == "multi"
 
+        # ── Session / history resolution ────────────────────────────────────
+        sid = req.session_id
+        if sid and not await session_exists(sid):
+            sid = None          # expired — will create fresh below
+
+        if sid is None:
+            sid = await create_session()
+
+        # Prefer DB history over what the frontend sent (authoritative source)
+        if is_multi:
+            db_history = await get_history(sid) or []
+            history = db_history
+        else:
+            history = []
+
+        # ── Store user turn ─────────────────────────────────────────────────
+        await append_turn(sid, "user", req.text)
+
         # 1. Encode raw query for routing
         query_emb = router.encode_query(req.text)
 
         # 2. Context-enriched RAG query (MULTI mode: prepend last 2 user turns)
         rag_emb = query_emb
-        if is_multi and req.conversation_history and store and query_emb is not None:
+        if is_multi and history and store and query_emb is not None:
             prior = []
-            for turn in reversed(req.conversation_history):
+            for turn in reversed(history):
                 if turn.get("role") == "user":
                     content = turn.get("content", "").strip()
                     if content and content != req.text:
@@ -239,8 +281,8 @@ async def classify(req: ClassifyRequest):
 
         # 3. Prior categories from history (MULTI + HIERARCHICAL_RAG)
         prior_categories: List[str] = []
-        if is_multi and req.conversation_history and hier_router:
-            for turn in reversed(req.conversation_history):
+        if is_multi and history and hier_router:
+            for turn in reversed(history):
                 if turn.get("role") == "assistant":
                     intent_name = turn.get("intent_classified")
                     if intent_name:
@@ -298,7 +340,7 @@ async def classify(req: ClassifyRequest):
             top_matches,
             rag_examples,
             matched_categories,
-            req.conversation_history if is_multi else None,
+            history if is_multi else None,
         )
 
         # 7. LLM call
@@ -319,15 +361,31 @@ async def classify(req: ClassifyRequest):
         )
         confidence = float(result.get("confidence", 0.5))
 
-        # 9. Confidence gate
+        # 9. Confidence blend (REIC: ground LLM confidence with retrieval evidence)
+        if rag_examples and RAG_CONFIDENCE_BLEND > 0:
+            top_ret = float(rag_examples[0]["score"])
+            confidence = (1.0 - RAG_CONFIDENCE_BLEND) * confidence + RAG_CONFIDENCE_BLEND * top_ret
+
+        # 10. Confidence gate
         if rag_examples and rag_examples[0]["score"] < 0.35:
             confidence = min(confidence, 0.55)
+
+        # ── Store assistant turn ─────────────────────────────────────────────
+        await append_turn(sid, "assistant", intent_name, metadata={
+            "intent_classified":  intent_name,
+            "confidence":         confidence,
+            "matched_categories": matched_categories,
+            "mode":               req.mode,
+            "turn_mode":          req.turn_mode,
+            "rag_examples":       rag_examples,
+        })
 
         return ClassifyResponse(
             intent=intent_name,
             confidence=confidence,
             rag_examples=rag_examples,
             matched_categories=matched_categories,
+            session_id=sid,
         )
 
     except httpx.HTTPStatusError as e:
@@ -338,6 +396,54 @@ async def classify(req: ClassifyRequest):
     except Exception as e:
         logger.error("Classification failed", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Session endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/sessions")
+async def new_session():
+    """Create a fresh session. Returns session_id + TTL in seconds."""
+    sid = await create_session()
+    return {"session_id": sid, "ttl_seconds": SESSION_TTL}
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Return the turn history for a session (404 if expired/missing)."""
+    turns = await get_history(session_id)
+    if turns is None:
+        raise HTTPException(status_code=404, detail="Session not found or expired")
+    return {"session_id": session_id, "turns": turns, "ttl_seconds": SESSION_TTL}
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Clear a session's turns (used by 'New conversation')."""
+    from web.db import clear_session_turns
+    await clear_session_turns(session_id)
+    return {"status": "cleared"}
+
+
+# ---------------------------------------------------------------------------
+# Ollama model discovery
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ollama/models")
+async def ollama_models(base_url: str = "http://localhost:11434"):
+    """Proxy to Ollama /api/tags so the browser avoids CORS issues."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(base_url.rstrip("/") + "/api/tags")
+            r.raise_for_status()
+            data = r.json()
+            names = [m["name"] for m in data.get("models", [])]
+            return {"models": names}
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Cannot reach Ollama at " + base_url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

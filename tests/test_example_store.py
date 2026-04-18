@@ -155,6 +155,69 @@ class TestRetrieval:
         assert len(results) == 3
         assert all("intent" in r for r in results)
 
+    def test_per_intent_limit_enforced(self, encoder):
+        """No single intent should exceed per_intent_limit in the result set."""
+        store = ExampleStore(encoder=encoder)
+        # Add 4 examples for the same intent
+        store.add_examples_bulk([
+            {"text": "what is my balance",        "intent": "check_balance"},
+            {"text": "check my account balance",  "intent": "check_balance"},
+            {"text": "how much money do I have",  "intent": "check_balance"},
+            {"text": "show me my balance",        "intent": "check_balance"},
+            {"text": "transfer money to savings", "intent": "transfer_money"},
+            {"text": "send money to john",        "intent": "transfer_money"},
+        ])
+        query_emb = encoder.encode("account balance")
+        results = store.retrieve_from_embedding(query_emb, k=6, per_intent_limit=2)
+
+        intent_counts: dict = {}
+        for r in results:
+            intent_counts[r["intent"]] = intent_counts.get(r["intent"], 0) + 1
+
+        for intent, count in intent_counts.items():
+            assert count <= 2, f"Intent '{intent}' appears {count} times, limit is 2"
+
+    def test_per_intent_limit_default_from_config(self, encoder):
+        """Default per_intent_limit should come from RAG_PER_INTENT_LIMIT config."""
+        from query_classifier.config import RAG_PER_INTENT_LIMIT
+        store = ExampleStore(encoder=encoder)
+        # 5 examples from one intent
+        store.add_examples_bulk([
+            {"text": "what is my balance",        "intent": "check_balance"},
+            {"text": "check my account balance",  "intent": "check_balance"},
+            {"text": "how much money do I have",  "intent": "check_balance"},
+            {"text": "show me my balance",        "intent": "check_balance"},
+            {"text": "my balance please",         "intent": "check_balance"},
+        ])
+        query_emb = encoder.encode("balance")
+        results = store.retrieve_from_embedding(query_emb, k=10)  # no explicit limit
+
+        check_balance_count = sum(1 for r in results if r["intent"] == "check_balance")
+        assert check_balance_count <= RAG_PER_INTENT_LIMIT
+
+    def test_per_intent_limit_diversity_across_intents(self, populated_store, encoder):
+        """Results should span multiple intents when store is diverse."""
+        query_emb = encoder.encode("account balance transfer card loan support")
+        results = populated_store.retrieve_from_embedding(query_emb, k=6, per_intent_limit=1)
+
+        unique_intents = {r["intent"] for r in results}
+        # With per_intent_limit=1 and a diverse store, each result must be a different intent
+        assert len(unique_intents) == len(results)
+
+    def test_per_intent_limit_still_sorted_by_score(self, encoder):
+        """Results must remain sorted by score even after per-intent filtering."""
+        store = ExampleStore(encoder=encoder)
+        store.add_examples_bulk([
+            {"text": "what is my balance",        "intent": "check_balance"},
+            {"text": "check my account balance",  "intent": "check_balance"},
+            {"text": "transfer money to savings", "intent": "transfer_money"},
+            {"text": "I need my bank statement",  "intent": "bank_statement"},
+        ])
+        query_emb = encoder.encode("balance account")
+        results = store.retrieve_from_embedding(query_emb, k=4, per_intent_limit=1)
+        scores = [r["score"] for r in results]
+        assert scores == sorted(scores, reverse=True)
+
 
 # ---------------------------------------------------------------------------
 # Persistence
