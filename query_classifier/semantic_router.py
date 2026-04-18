@@ -22,18 +22,18 @@ class SemanticRouter:
 
         logger.info(f"Attempting to load embedding model: {model_name}...")
         try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
+            from query_classifier.encoder import get_encoder
+            self.model = get_encoder(model_name)
             self._intent_embeddings = np.array(
                 self.model.encode(self.descriptions, show_progress_bar=False),
                 dtype=np.float32,
             )
-            logger.info("Semantic Router ready with SentenceTransformer.")
+            logger.info("Semantic Router ready.")
         except ImportError as e:
-            logger.warning(f"SentenceTransformer not available ({e}). Using TF-IDF fallback.")
+            logger.warning(f"Encoder not available ({e}). Using TF-IDF fallback.")
             self._setup_tfidf()
         except Exception as e:
-            logger.warning(f"Failed to load SentenceTransformer ({e}). Using TF-IDF fallback.")
+            logger.warning(f"Failed to load encoder ({e}). Using TF-IDF fallback.")
             self._setup_tfidf()
 
     def _setup_tfidf(self):
