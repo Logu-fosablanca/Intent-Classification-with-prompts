@@ -15,14 +15,13 @@ LLM_CLIENT_ID = os.getenv("LLM_CLIENT_ID", "")
 LLM_CLIENT_SECRET = os.getenv("LLM_CLIENT_SECRET", "")
 
 # Embedding Provider
-# Options: "local" (SentenceTransformers, default) | "jina" (Jina AI API, zero RAM)
-# Use "jina" on memory-constrained hosts (e.g. Render free tier: 512 MB)
+# Options: "local" | "openai" | "cohere" | "voyageai" | "jina" | "ollama"
+# Use any API-based provider on memory-constrained hosts (e.g. Render free 512 MB)
+# See query_classifier/encoder.py for full documentation.
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local")
-
-# Jina AI (only used when EMBEDDING_PROVIDER=jina)
-# Get a free key at https://jina.ai — 1M tokens/month, no credit card
-JINA_API_KEY = os.getenv("JINA_API_KEY", "")
-JINA_MODEL = os.getenv("JINA_MODEL", "jina-embeddings-v3")
+EMBEDDING_API_KEY  = os.getenv("EMBEDDING_API_KEY", "")   # API key for the chosen provider
+EMBEDDING_MODEL    = os.getenv("EMBEDDING_MODEL", "")     # overrides provider default model
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "")  # for Ollama or OpenAI-compatible endpoints
 
 # Semantic Router Embedding Model (used when EMBEDDING_PROVIDER=local)
 # Default: "all-MiniLM-L6-v2"
