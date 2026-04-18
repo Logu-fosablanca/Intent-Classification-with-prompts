@@ -2,17 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps for sentence-transformers
+# Install system deps for sentence-transformers and git (needed for pip git installs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
+    gcc git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install web requirements first (better layer caching)
+# Copy and install web requirements (includes query-classifier from GitHub)
 COPY web/requirements.txt /app/web/requirements.txt
 RUN pip install --no-cache-dir -r web/requirements.txt
-
-# Copy the library
-COPY query_classifier/ /app/query_classifier/
 
 # Copy the web app
 COPY web/ /app/web/
