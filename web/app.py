@@ -97,7 +97,7 @@ class ClassifyRequest(BaseModel):
     llm_base_url: str = "https://api.openai.com"
     llm_model_name: str = "gpt-4o-mini"
     llm_api_key: str = ""
-    llm_provider: str = "openai"                   # openai | ollama
+    llm_provider: str = "openai"                   # openai | openrouter | ollama
 
 
 class ClassifyResponse(BaseModel):
@@ -192,10 +192,11 @@ def _get_components(req: ClassifyRequest) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# LLM call (OpenAI-compatible or Ollama)
+# LLM call helpers
 # ---------------------------------------------------------------------------
 
 async def _call_openai(prompt: str, base_url: str, model: str, api_key: str) -> str:
+    """OpenAI-compatible endpoint (OpenAI, Groq, Together AI, etc.)."""
     url = base_url.rstrip("/") + "/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -215,7 +216,39 @@ async def _call_openai(prompt: str, base_url: str, model: str, api_key: str) -> 
         return r.json()["choices"][0]["message"]["content"]
 
 
+async def _call_openrouter(prompt: str, model: str, api_key: str) -> str:
+    """
+    OpenRouter (https://openrouter.ai) — OpenAI-compatible with two extra headers
+    that OpenRouter uses for rate-limit attribution and dashboard labelling.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/Logu-fosablanca/Intent-Classification-with-prompts",
+        "X-Title": "REIC Intent Classifier Demo",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+            },
+        )
+        r.raise_for_status()
+        data = r.json()
+        # OpenRouter surfaces upstream errors inside the JSON body
+        if "error" in data:
+            raise HTTPException(status_code=502, detail=str(data["error"]))
+        return data["choices"][0]["message"]["content"]
+
+
 async def _call_ollama(prompt: str, base_url: str, model: str, api_key: str) -> str:
+    """Local Ollama instance."""
     import ollama
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -348,6 +381,10 @@ async def classify(req: ClassifyRequest):
             content = await _call_ollama(
                 prompt, req.llm_base_url, req.llm_model_name, req.llm_api_key
             )
+        elif req.llm_provider == "openrouter":
+            content = await _call_openrouter(
+                prompt, req.llm_model_name, req.llm_api_key
+            )
         else:
             content = await _call_openai(
                 prompt, req.llm_base_url, req.llm_model_name, req.llm_api_key
@@ -427,12 +464,12 @@ async def delete_session(session_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Ollama model discovery
+# Model discovery endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/api/ollama/models")
 async def ollama_models(base_url: str = "http://localhost:11434"):
-    """Proxy to Ollama /api/tags so the browser avoids CORS issues."""
+    """Proxy to Ollama /api/tags — avoids browser CORS issues."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(base_url.rstrip("/") + "/api/tags")
@@ -442,6 +479,39 @@ async def ollama_models(base_url: str = "http://localhost:11434"):
             return {"models": names}
     except httpx.ConnectError:
         raise HTTPException(status_code=503, detail="Cannot reach Ollama at " + base_url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/openrouter/models")
+async def openrouter_models(api_key: str = ""):
+    """
+    Fetch the list of models available on OpenRouter.
+    Returns them sorted: free models first, then by name.
+    Proxied server-side to avoid CORS and keep the API key out of browser logs.
+    """
+    headers: dict = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get("https://openrouter.ai/api/v1/models", headers=headers)
+            r.raise_for_status()
+            data = r.json()
+        models_raw = data.get("data", [])
+        # Build concise list: id + pricing label
+        models = []
+        for m in models_raw:
+            mid = m.get("id", "")
+            pricing = m.get("pricing", {})
+            prompt_cost = float(pricing.get("prompt", 1) or 1)
+            is_free = prompt_cost == 0
+            models.append({"id": mid, "free": is_free})
+        # Free models first, then alphabetical
+        models.sort(key=lambda x: (not x["free"], x["id"]))
+        return {"models": [m["id"] for m in models], "free_count": sum(1 for m in models if m["free"])}
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Cannot reach OpenRouter")
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
