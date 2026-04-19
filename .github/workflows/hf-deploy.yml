@@ -1,0 +1,47 @@
+name: Deploy to Hugging Face Spaces
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "GitHub CI"
+
+          # Clone the HF Space repo
+          git clone https://Logu-fosablanca:$HF_TOKEN@huggingface.co/spaces/Logu-fosablanca/intent-classifier-reic hf_space
+
+          # Sync repo contents into the Space (exclude git history and dev files)
+          rsync -av --delete \
+            --exclude='.git' \
+            --exclude='venv/' \
+            --exclude='dist/' \
+            --exclude='*.egg-info' \
+            --exclude='.pytest_cache' \
+            --exclude='__pycache__' \
+            --exclude='web/sessions.db' \
+            ./ hf_space/
+
+          cd hf_space
+          git add -A
+
+          # Only commit if there are actual changes
+          if git diff --cached --quiet; then
+            echo "No changes to deploy."
+          else
+            git commit -m "sync: deploy from GitHub ${{ github.sha }}"
+            git push
+          fi

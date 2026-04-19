@@ -1,3 +1,13 @@
+---
+title: Intent Classifier REIC
+emoji: 🎯
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Intent Classifier — REIC Implementation
 
 A production-grade, configurable intent classification library implementing learnings from the **REIC: RAG-Enhanced Intent Classification at Scale** paper (Amazon, 2024).
