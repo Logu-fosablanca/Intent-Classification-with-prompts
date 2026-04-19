@@ -3,23 +3,66 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "query_classifier"
-version = "0.1.2"
-description = "A generic intent classification library using Semantic Routing and LLMs"
-authors = [
-  { name="Logu" },
+name = "query-classifier"
+version = "0.2.0"
+description = "RAG-Enhanced Intent Classification (REIC) — semantic routing + LLMs"
+authors = [{ name = "Logu" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["intent-classification", "nlp", "rag", "llm", "semantic-routing"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-requires-python = ">=3.8"
+
+# Only numpy is truly required — encoder backend is chosen via EMBEDDING_PROVIDER
 dependencies = [
     "numpy>=1.26.0",
-    "sentence-transformers>=2.7.0",
 ]
 
 [project.optional-dependencies]
-ollama = ["ollama"]
-agent = ["uagents"]
+# Local on-device embeddings (default experience, needs ~500 MB RAM)
+local = [
+    "sentence-transformers>=2.7.0",
+]
+# Ollama local server embeddings
+ollama = [
+    "ollama",
+]
+# Agent utilities (optional, unrelated to core REIC pipeline)
+agent = [
+    "uagents",
+]
+# Everything for local development
+all = [
+    "sentence-transformers>=2.7.0",
+    "ollama",
+]
+# Development and testing
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "sentence-transformers>=2.7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Logu-fosablanca/Intent-Classification-with-prompts"
+Repository = "https://github.com/Logu-fosablanca/Intent-Classification-with-prompts"
+Issues = "https://github.com/Logu-fosablanca/Intent-Classification-with-prompts/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["query_classifier*"]
-exclude = ["venv*", "dist*", "build*"]
+exclude = ["venv*", "dist*", "build*", "tests*", "examples*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

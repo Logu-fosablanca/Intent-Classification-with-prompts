@@ -22,3 +22,9 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test / misc
+.pytest_cache/
+.mypy_cache/
+*.db
+=*
