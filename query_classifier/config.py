@@ -44,6 +44,13 @@ EXAMPLE_STORE_PATH = os.getenv("EXAMPLE_STORE_PATH", "")
 # Turn Mode — "single" or "multi" (see TurnMode enum)
 TURN_MODE = os.getenv("TURN_MODE", "single")
 
+# Permutation Self-Consistency — number of shuffled LLM passes per query.
+# Each pass receives the candidate list in a different random order; a Borda
+# count aggregates the ranked outputs into a position-bias-free final answer.
+# Research (NAACL 2024, ACL 2025) shows 3 passes captures most of the gain.
+# Set to 1 to disable (original single-pass behaviour).
+VOTE_N_PASSES = int(os.getenv("VOTE_N_PASSES", "3"))
+
 # Bootstrap Configuration (ExampleStoreBootstrapper)
 # Number of single-turn examples to generate per intent via LLM
 BOOTSTRAP_N_SINGLE = int(os.getenv("BOOTSTRAP_N_SINGLE", "8"))

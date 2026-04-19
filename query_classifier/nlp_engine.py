@@ -2,6 +2,7 @@
 import logging
 import asyncio
 import json
+import random
 import numpy as np
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Union
@@ -10,7 +11,7 @@ from query_classifier.semantic_router import SemanticRouter
 from query_classifier.config import (
     LLM_MODEL_NAME, LANG_DETECT_MODEL, LLM_PROVIDER,
     LLM_API_BASE, LLM_API_KEY, RAG_TOP_K_EXAMPLES, EXAMPLE_STORE_PATH,
-    TURN_MODE, RAG_CONFIDENCE_BLEND,
+    TURN_MODE, RAG_CONFIDENCE_BLEND, VOTE_N_PASSES,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -130,6 +131,8 @@ class IntentClassifier:
         # Hierarchy (required for HIERARCHICAL_RAG)
         intent_hierarchy: Optional[Dict] = None,
         top_n_categories: int = 2,
+        # Permutation Self-Consistency (position-bias mitigation)
+        vote_n_passes: int = VOTE_N_PASSES,
     ):
         """
         Parameters
@@ -158,6 +161,7 @@ class IntentClassifier:
         self.llm_base_url = llm_base_url
         self.llm_api_key = llm_api_key
         self.enable_lang_detect = enable_lang_detect
+        self.n_votes = max(1, vote_n_passes)
 
         logger.info(f"Initializing IntentClassifier | mode={self.mode.value} | turn_mode={self.turn_mode.value}")
 
@@ -431,6 +435,7 @@ class IntentClassifier:
         rag_examples: List[dict],
         matched_categories: List[str],
         conversation_history: Optional[List[dict]],
+        candidate_order: Optional[List[int]] = None,
     ) -> str:
         sections = []
 
@@ -471,34 +476,57 @@ class IntentClassifier:
                 "No labeled examples available. Rely on intent descriptions and reasoning."
             )
 
-        # --- Candidate Intents ---
+        # --- Candidate Intents (apply shuffle if a permutation order is provided) ---
+        ordered_matches = (
+            [top_matches[i] for i in candidate_order]
+            if candidate_order is not None
+            else top_matches
+        )
         candidate_lines = "\n".join(
             f'  - {m["intent"]["name"]}: {m["intent"]["description"]}'
-            for m in top_matches
+            for m in ordered_matches
         )
         sections.append("CANDIDATE INTENTS:\n" + candidate_lines)
 
         # --- Query ---
         sections.append(f'User Query: "{text}"')
 
-        # --- Instructions (adapt by mode) ---
+        # --- Instructions (Tree of Thought, adapt by mode) ---
+        # Three independent branches prevent the model from anchoring on the
+        # top-ranked semantic candidate and then rationalising after the fact.
+        # Each branch explores a different angle; the consensus across branches
+        # determines the final intent — not list position.
+        ranked_instruction = (
+            "After completing all three branches, rank ALL candidate intents from most "
+            "to least likely. The intent you rank first is your answer."
+        )
+
         if self.mode == ClassificationMode.FLAT:
             instructions = (
-                "Select the single best matching intent from the candidates above.\n"
-                "Use the intent descriptions to guide your decision."
+                "Analyze this query through three independent branches before ranking:\n\n"
+                "BRANCH 1 — Literal action: What specific action or task is the user asking to perform?\n"
+                "BRANCH 2 — Underlying need: What is the root problem or concern behind this query?\n"
+                "BRANCH 3 — Description match: Which candidate description above most accurately describes what the user wants?\n\n"
+                + ranked_instruction
             )
         elif self.mode == ClassificationMode.FLAT_RAG:
             instructions = (
-                "Study the retrieved examples — they show how similar queries were classified before.\n"
-                "If examples strongly agree on one intent, prefer that classification.\n"
-                "If examples are mixed or absent, use the candidate descriptions to decide."
+                "Analyze this query through three independent branches before ranking:\n\n"
+                "BRANCH 1 — Literal action: What specific action or task is the user asking to perform?\n"
+                "BRANCH 2 — Underlying need: What is the root problem or concern behind this query?\n"
+                "BRANCH 3 — Evidence match: Which retrieved example above most closely matches the meaning of this query "
+                "(judge by meaning, not similarity score)?\n\n"
+                + ranked_instruction
             )
         else:  # HIERARCHICAL_RAG
             instructions = (
                 "You are working within a focused domain (see DOMAIN CONTEXT above).\n"
-                "Study the retrieved examples as primary evidence.\n"
-                "If examples strongly agree on one intent, prefer it.\n"
-                "If mixed or absent, use the candidate descriptions within this domain to decide."
+                "Analyze this query through three independent branches before ranking:\n\n"
+                "BRANCH 1 — Literal action: What specific action or task is the user asking to perform?\n"
+                "BRANCH 2 — Underlying need: What is the root problem or concern behind this query?\n"
+                "BRANCH 3 — Evidence match: Which retrieved example above most closely matches the meaning of this query "
+                "(judge by meaning, not similarity score)?\n\n"
+                + ranked_instruction
             )
 
         body = "\n\n".join(sections)
@@ -509,9 +537,13 @@ class IntentClassifier:
             f"{instructions}\n\n"
             "Return ONLY valid JSON with no extra text:\n"
             "{\n"
-            '    "name": "intent_name",\n'
+            '    "branch_1": "what the user literally wants to do",\n'
+            '    "branch_2": "the underlying need or concern",\n'
+            '    "branch_3": "closest matching example or description",\n'
+            '    "ranked": ["best_intent", "second_best", "third_best", "...all candidates ordered best to worst"],\n'
+            '    "name": "must equal ranked[0]",\n'
             '    "confidence": 0.0,\n'
-            '    "reasoning": "one concise sentence"\n'
+            '    "reasoning": "one sentence citing the consensus across branches"\n'
             "}"
         )
 
@@ -549,6 +581,72 @@ class IntentClassifier:
             '    "confidence_score": 0.0\n'
             "}"
         )
+
+    # ------------------------------------------------------------------
+    # Borda Count Aggregation (Permutation Self-Consistency)
+    # ------------------------------------------------------------------
+
+    def _borda_aggregate(
+        self, results: List[dict], n_candidates: int
+    ) -> Tuple[str, float]:
+        """
+        Aggregate N ranked outputs using Borda count (ACL 2025 / NAACL 2024).
+
+        Each pass outputs a `ranked` list of intent names ordered best→worst.
+        Borda assigns n_candidates points to rank-1, n_candidates-1 to rank-2,
+        and so on. The intent with the highest cumulative Borda score wins.
+
+        Confidence is the mean LLM-reported confidence across the passes where
+        the winning intent appeared at rank-1.
+
+        Args:
+            results     : list of parsed JSON dicts from each LLM pass
+            n_candidates: number of candidate intents (= len(top_matches))
+
+        Returns:
+            (winner_intent_name, aggregated_confidence)
+        """
+        borda_scores: Dict[str, float] = {}
+        winner_confidences: List[float] = []
+
+        for result in results:
+            ranked: List[str] = result.get("ranked", [])
+            if not ranked:
+                # Fallback: model only gave "name" — treat it as rank-1
+                name = result.get("name", "")
+                if name:
+                    ranked = [name]
+
+            for pos, intent_name in enumerate(ranked):
+                pts = max(n_candidates - pos, 1)  # rank-1 → n_candidates, rank-last → 1
+                borda_scores[intent_name] = borda_scores.get(intent_name, 0.0) + pts
+
+        if not borda_scores:
+            return "", 0.5
+
+        winner = max(borda_scores, key=lambda k: borda_scores[k])
+
+        # Collect LLM confidences from passes that ranked winner first
+        for result in results:
+            ranked = result.get("ranked", [])
+            top = ranked[0] if ranked else result.get("name", "")
+            if top == winner:
+                winner_confidences.append(float(result.get("confidence", 0.5)))
+
+        avg_conf = (
+            sum(winner_confidences) / len(winner_confidences)
+            if winner_confidences
+            else 0.5
+        )
+
+        total = sum(borda_scores.values())
+        borda_ratio = borda_scores[winner] / total if total > 0 else 0.5
+        logger.info(
+            f"Borda aggregate: winner='{winner}' | "
+            f"score={borda_scores[winner]:.0f}/{total:.0f} ({borda_ratio:.0%}) | "
+            f"avg_conf={avg_conf:.2f} | passes={len(results)}"
+        )
+        return winner, avg_conf
 
     # ------------------------------------------------------------------
     # Language Detection
@@ -709,30 +807,56 @@ class IntentClassifier:
                     + str([(e["intent"], round(e["score"], 2)) for e in rag_examples])
                 )
 
-        # 7. Build mode-aware prompt
-        prompt = self._build_prompt(
-            text, top_matches, rag_examples, matched_categories, conversation_history
-        )
-
-        # 8. LLM classification
+        # 7-8. LLM classification — Permutation Self-Consistency (NAACL 2024 / ACL 2025).
+        #
+        # Run self.n_votes passes in parallel, each receiving the candidate list
+        # in a different random order. Each pass returns a full ranking of all
+        # candidates (branch_1/2/3 reasoning + ranked list). A Borda count
+        # aggregates the ranked outputs into a position-bias-free final answer.
+        #
+        # All passes fire concurrently via asyncio.gather — wall-clock latency
+        # equals the slowest single pass, not n_votes × single pass.
         client = self._get_client()
-        try:
-            logger.info(f"LLM classify | query='{text}'")
-            response = await client.chat(
-                model=self.llm_model_name,
-                messages=[{"role": "user", "content": prompt}],
+        indices = list(range(len(top_matches)))
+
+        async def _one_pass(seed: int) -> dict:
+            order = indices[:]
+            random.Random(seed).shuffle(order)
+            p = self._build_prompt(
+                text, top_matches, rag_examples,
+                matched_categories, conversation_history,
+                candidate_order=order,
             )
-            content = response["message"]["content"]
-            logger.info(f"LLM response: {content}")
-            result = self._extract_json(content)
+            resp = await client.chat(
+                model=self.llm_model_name,
+                messages=[{"role": "user", "content": p}],
+                keep_alive="10m",
+            )
+            logger.info(f"LLM pass {seed} response: {resp['message']['content'][:120]}")
+            return self._extract_json(resp["message"]["content"])
+
+        try:
+            logger.info(
+                f"LLM classify | query='{text}' | n_passes={self.n_votes}"
+            )
+            pass_results = await asyncio.gather(
+                *[_one_pass(i) for i in range(self.n_votes)],
+                return_exceptions=True,
+            )
+            valid_results = [r for r in pass_results if isinstance(r, dict)]
+            if not valid_results:
+                raise ValueError("All LLM passes failed or returned invalid JSON")
+            intent_name, llm_confidence = self._borda_aggregate(
+                valid_results, len(top_matches)
+            )
+            if not intent_name:
+                intent_name = top_matches[0]["intent"]["name"]
+                llm_confidence = top_matches[0]["score"]
         except Exception as e:
             logger.error(f"LLM inference failed: {e}. Falling back to top semantic match.")
             lang = await future_lang
             best = top_matches[0]
             return best["intent"]["name"], best["score"], lang
-
-        intent_name = result.get("name", top_matches[0]["intent"]["name"])
-        llm_confidence = float(result.get("confidence", 0.5))
 
         # 9. Confidence blend: mix LLM confidence with top retrieval similarity.
         #    Grounds the score in empirical evidence — if retrieval is weak, the
@@ -768,6 +892,7 @@ class IntentClassifier:
                 v_response = await client.chat(
                     model=self.llm_model_name,
                     messages=[{"role": "user", "content": verify_prompt}],
+                    keep_alive="10m",
                 )
                 v_result = self._extract_json(v_response["message"]["content"])
                 logger.info(f"Verification: {v_result}")
