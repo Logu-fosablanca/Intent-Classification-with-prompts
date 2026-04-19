@@ -573,6 +573,10 @@ class IntentClassifier:
     # ------------------------------------------------------------------
 
     def _extract_json(self, content: str) -> dict:
+        import re
+        # Strip <think>...</think> blocks (Qwen3 and other reasoning models)
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
         clean = content
         if "```json" in content:
             clean = content.split("```json")[1].split("```")[0].strip()
