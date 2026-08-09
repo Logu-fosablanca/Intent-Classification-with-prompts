@@ -52,6 +52,8 @@ def _make_classifier(
     clf.lang_model = None
     clf._intents_by_name = {i["name"]: i for i in SAMPLE_INTENTS}
     clf._hierarchy = intent_hierarchy or {}
+    clf.rerank_mode = "off"
+    clf.reranker = None
 
     # Inject MockEncoder-backed router
     from query_classifier.semantic_router import SemanticRouter

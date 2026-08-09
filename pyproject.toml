@@ -41,16 +41,26 @@ ollama = [
 agent = [
     "uagents",
 ]
+# Hybrid FAISS+BM25 retrieval and LLM reranking (e.g. Qwen3-4B via Ollama)
+rerank = [
+    "faiss-cpu>=1.8.0",
+    "rank-bm25>=0.2.2",
+    "ollama",
+]
 # Everything for local development
 all = [
     "sentence-transformers>=2.7.0",
     "ollama",
+    "faiss-cpu>=1.8.0",
+    "rank-bm25>=0.2.2",
 ]
 # Development and testing
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "sentence-transformers>=2.7.0",
+    "faiss-cpu>=1.8.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.urls]
@@ -58,10 +68,8 @@ Homepage = "https://github.com/Logu-fosablanca/Intent-Classification-with-prompt
 Repository = "https://github.com/Logu-fosablanca/Intent-Classification-with-prompts"
 Issues = "https://github.com/Logu-fosablanca/Intent-Classification-with-prompts/issues"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["query_classifier*"]
-exclude = ["venv*", "dist*", "build*", "tests*", "examples*"]
+[tool.setuptools]
+packages = ["query_classifier"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

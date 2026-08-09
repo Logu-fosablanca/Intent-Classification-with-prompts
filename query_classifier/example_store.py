@@ -20,7 +20,7 @@ import logging
 import numpy as np
 from typing import List, Dict, Optional
 
-from query_classifier.config import ROUTER_EMBEDDING_MODEL, RAG_PER_INTENT_LIMIT
+from query_classifier.config import ROUTER_EMBEDDING_MODEL, RAG_PER_INTENT_LIMIT, USE_HYBRID_RETRIEVAL
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +50,35 @@ class ExampleStore:
     whichever matches the enriched query best surfaces to the top.
     """
 
-    def __init__(self, encoder=None, model_name: Optional[str] = None):
+    def __init__(
+        self,
+        encoder=None,
+        model_name: Optional[str] = None,
+        use_hybrid: Optional[bool] = None,
+    ):
         """
         Args:
             encoder: A pre-loaded SentenceTransformer instance.
                      Pass SemanticRouter.model to avoid loading the model twice.
             model_name: If encoder is None, load this SentenceTransformer model.
                         Defaults to ROUTER_EMBEDDING_MODEL from config.
+            use_hybrid: Enable FAISS+BM25 hybrid retrieval (see hybrid_retriever.py).
+                        Defaults to USE_HYBRID_RETRIEVAL from config. Silently falls
+                        back to dense-only cosine ranking if faiss-cpu / rank-bm25
+                        aren't installed, or if a query is retrieved without text
+                        (see retrieve_from_embedding).
         """
         self._texts: List[str] = []
         self._intents: List[str] = []
         self._history_contexts: List[Optional[str]] = []   # None for single-turn examples
         self._embeddings: Optional[np.ndarray] = None      # shape (N, D)
+
+        self.use_hybrid = USE_HYBRID_RETRIEVAL if use_hybrid is None else use_hybrid
+        self._hybrid_retriever = None
+        self._hybrid_dirty = True
+        if self.use_hybrid:
+            from query_classifier.hybrid_retriever import HybridRetriever
+            self._hybrid_retriever = HybridRetriever()
 
         if encoder is not None:
             self.encoder = encoder
@@ -99,6 +116,7 @@ class ExampleStore:
         self._history_contexts.append(history_context)
         emb = np.array(emb, dtype=np.float32).reshape(1, -1)
         self._embeddings = emb if self._embeddings is None else np.vstack([self._embeddings, emb])
+        self._hybrid_dirty = True
 
     # ------------------------------------------------------------------
     # Population API
@@ -169,6 +187,7 @@ class ExampleStore:
             new_embs if self._embeddings is None
             else np.vstack([self._embeddings, new_embs])
         )
+        self._hybrid_dirty = True
 
         n_multi = sum(1 for e in examples if e.get("history_context"))
         logger.info(
@@ -186,6 +205,7 @@ class ExampleStore:
         query_emb: np.ndarray,
         k: int = 6,
         per_intent_limit: Optional[int] = None,
+        query_text: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve top-k most similar examples using a pre-computed query embedding.
@@ -206,10 +226,17 @@ class ExampleStore:
             per_intent_limit: Maximum examples from any single intent.
                               Defaults to RAG_PER_INTENT_LIMIT from config (2).
                               Set to None or a large number to disable.
+            query_text: Raw query string matching query_emb. Required to activate
+                        hybrid FAISS+BM25 ranking (self.use_hybrid) — without it,
+                        retrieval silently falls back to dense-only cosine ranking
+                        even if hybrid is enabled, since BM25 needs the raw text.
 
         Returns:
             List of {"text": str, "intent": str, "score": float} sorted by
-            similarity descending. text is always the raw utterance (readable).
+            rank descending. `score` is always cosine similarity — regardless of
+            whether hybrid fusion picked the ranking order — so downstream
+            confidence blending/gating keeps its existing [-1, 1]-ish scale.
+            text is always the raw utterance (readable).
         """
         if self._embeddings is None or len(self._texts) == 0:
             return []
@@ -223,10 +250,12 @@ class ExampleStore:
         norms = np.linalg.norm(self._embeddings, axis=1) + 1e-8
         scores = self._embeddings.dot(query_emb) / (norms * norm_q)
 
+        order = self._retrieval_order(query_emb, query_text, scores, k)
+
         results: List[Dict] = []
         intent_counts: Dict[str, int] = {}
 
-        for idx in np.argsort(scores)[::-1]:
+        for idx in order:
             intent = self._intents[idx]
             if intent_counts.get(intent, 0) >= per_intent_limit:
                 continue
@@ -241,6 +270,28 @@ class ExampleStore:
 
         return results
 
+    def _retrieval_order(
+        self, query_emb: np.ndarray, query_text: Optional[str], scores: np.ndarray, k: int
+    ) -> List[int]:
+        """
+        Candidate ranking order (best first), before per-intent diversity filtering.
+
+        Uses FAISS+BM25 hybrid fusion when hybrid is enabled, query_text is
+        provided, and the optional deps are installed. Otherwise falls back to
+        plain cosine ranking (the original behaviour) — hybrid only ever changes
+        WHICH ORDER items surface, never the reported score (see docstring above).
+        """
+        if self.use_hybrid and self._hybrid_retriever is not None and query_text:
+            if self._hybrid_dirty:
+                self._hybrid_retriever.build(self._texts, self._embeddings)
+                self._hybrid_dirty = False
+            if self._hybrid_retriever.available:
+                pool = min(len(self._texts), max(50, k * 8))
+                fused = self._hybrid_retriever.search(query_text, query_emb, k=pool)
+                if fused:
+                    return [c["index"] for c in fused]
+        return list(np.argsort(scores)[::-1])
+
     def retrieve(self, query: str, k: int = 6) -> List[Dict]:
         """
         Retrieve top-k examples by encoding the query on the fly.
@@ -249,7 +300,7 @@ class ExampleStore:
         if self.encoder is None:
             return []
         query_emb = self.encoder.encode(query, show_progress_bar=False)
-        return self.retrieve_from_embedding(query_emb, k=k)
+        return self.retrieve_from_embedding(query_emb, k=k, query_text=query)
 
     # ------------------------------------------------------------------
     # Persistence API
@@ -291,6 +342,7 @@ class ExampleStore:
         self._texts = [e["text"] for e in data]
         self._intents = [e["intent"] for e in data]
         self._history_contexts = [e.get("history_context") for e in data]
+        self._hybrid_dirty = True
 
         try:
             self._embeddings = np.load(f"{path}.npy")

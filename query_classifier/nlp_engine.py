@@ -10,7 +10,7 @@ from query_classifier.semantic_router import SemanticRouter
 from query_classifier.config import (
     LLM_MODEL_NAME, LANG_DETECT_MODEL, LLM_PROVIDER,
     LLM_API_BASE, LLM_API_KEY, RAG_TOP_K_EXAMPLES, EXAMPLE_STORE_PATH,
-    TURN_MODE, RAG_CONFIDENCE_BLEND,
+    TURN_MODE, RAG_CONFIDENCE_BLEND, RERANK_MODE, RERANKER_MODEL_NAME,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -130,6 +130,9 @@ class IntentClassifier:
         # Hierarchy (required for HIERARCHICAL_RAG)
         intent_hierarchy: Optional[Dict] = None,
         top_n_categories: int = 2,
+        # Reranker (optional — replaces the generative classification call)
+        rerank_mode: str = RERANK_MODE,
+        reranker_model_name: str = RERANKER_MODEL_NAME,
     ):
         """
         Parameters
@@ -150,6 +153,13 @@ class IntentClassifier:
         intent_hierarchy : dict mapping category → {"description", "intents"}
                            (required for hierarchical_rag mode)
         top_n_categories : how many top categories to consider at coarse level
+        rerank_mode      : "off" (default) | "listwise" | "pointwise".
+                           When not "off", the final classification call is
+                           replaced by QwenReranker.rerank() over top_matches +
+                           rag_examples instead of a single generative LLM call.
+        reranker_model_name : model served via Ollama for reranking (default
+                           "qwen3:4b"). Independent of llm_model_name — the
+                           reranker is typically a smaller model.
         """
         self.mode = ClassificationMode(mode)
         self.turn_mode = TurnMode(turn_mode)
@@ -159,7 +169,24 @@ class IntentClassifier:
         self.llm_api_key = llm_api_key
         self.enable_lang_detect = enable_lang_detect
 
-        logger.info(f"Initializing IntentClassifier | mode={self.mode.value} | turn_mode={self.turn_mode.value}")
+        if rerank_mode not in ("off", "listwise", "pointwise"):
+            raise ValueError(
+                f"rerank_mode must be 'off', 'listwise', or 'pointwise' (got {rerank_mode!r})."
+            )
+        self.rerank_mode = rerank_mode
+        self.reranker = None
+        if rerank_mode != "off":
+            from query_classifier.reranker import QwenReranker
+            self.reranker = QwenReranker(
+                model_name=reranker_model_name,
+                base_url=llm_base_url,
+                api_key=llm_api_key,
+            )
+
+        logger.info(
+            f"Initializing IntentClassifier | mode={self.mode.value} | "
+            f"turn_mode={self.turn_mode.value} | rerank_mode={self.rerank_mode}"
+        )
 
         # Intent lookup used for contextual query building (routing context needs description)
         self._intents_by_name: Dict[str, dict] = {i["name"]: i for i in intents}
@@ -376,7 +403,10 @@ class IntentClassifier:
     # ------------------------------------------------------------------
 
     def _get_rag_examples(
-        self, query_emb: np.ndarray, matched_categories: List[str]
+        self,
+        query_emb: np.ndarray,
+        matched_categories: List[str],
+        query_text: Optional[str] = None,
     ) -> List[dict]:
         """
         Retrieve few-shot examples from the ExampleStore.
@@ -386,12 +416,17 @@ class IntentClassifier:
         if category filtering yields fewer than 3 examples.
 
         For FLAT / FLAT_RAG: retrieves globally (no category filter).
+
+        query_text : raw RAG query string (context-enriched in MULTI turn mode).
+                     Passed through to ExampleStore so hybrid FAISS+BM25 ranking
+                     (if enabled) can use BM25 lexical matching alongside dense
+                     similarity — see ExampleStore.retrieve_from_embedding.
         """
         if self.example_store is None or self.mode == ClassificationMode.FLAT:
             return []
 
         all_examples = self.example_store.retrieve_from_embedding(
-            query_emb, k=RAG_TOP_K_EXAMPLES
+            query_emb, k=RAG_TOP_K_EXAMPLES, query_text=query_text
         )
 
         if not matched_categories or self.mode != ClassificationMode.HIERARCHICAL_RAG:
@@ -681,6 +716,7 @@ class IntentClassifier:
             else:
                 rag_emb = query_emb
         else:
+            rag_query = text
             rag_emb = query_emb
 
         # 5. Route using the raw query embedding.
@@ -701,7 +737,7 @@ class IntentClassifier:
         rag_examples: List[dict] = []
         if rag_emb is not None:
             rag_examples = await loop.run_in_executor(
-                None, self._get_rag_examples, rag_emb, matched_categories
+                None, self._get_rag_examples, rag_emb, matched_categories, rag_query
             )
             if rag_examples:
                 logger.info(
@@ -709,30 +745,44 @@ class IntentClassifier:
                     + str([(e["intent"], round(e["score"], 2)) for e in rag_examples])
                 )
 
-        # 7. Build mode-aware prompt
-        prompt = self._build_prompt(
-            text, top_matches, rag_examples, matched_categories, conversation_history
-        )
-
-        # 8. LLM classification
+        # 7-8. Final classification: either the reranker (Qwen3-4B or similar,
+        #      scoring/ranking top_matches directly) or the original generative
+        #      LLM call over a mode-aware prompt.
         client = self._get_client()
-        try:
-            logger.info(f"LLM classify | query='{text}'")
-            response = await client.chat(
-                model=self.llm_model_name,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            content = response["message"]["content"]
-            logger.info(f"LLM response: {content}")
-            result = self._extract_json(content)
-        except Exception as e:
-            logger.error(f"LLM inference failed: {e}. Falling back to top semantic match.")
-            lang = await future_lang
-            best = top_matches[0]
-            return best["intent"]["name"], best["score"], lang
 
-        intent_name = result.get("name", top_matches[0]["intent"]["name"])
-        llm_confidence = float(result.get("confidence", 0.5))
+        if self.reranker is not None:
+            try:
+                logger.info(f"Reranker classify | mode={self.rerank_mode} | query='{text}'")
+                intent_name, llm_confidence, raw_result = await self.reranker.rerank(
+                    self.rerank_mode, text, top_matches, rag_examples
+                )
+                logger.info(f"Reranker result: {raw_result}")
+            except Exception as e:
+                logger.error(f"Reranker failed: {e}. Falling back to top semantic match.")
+                lang = await future_lang
+                best = top_matches[0]
+                return best["intent"]["name"], best["score"], lang
+        else:
+            prompt = self._build_prompt(
+                text, top_matches, rag_examples, matched_categories, conversation_history
+            )
+            try:
+                logger.info(f"LLM classify | query='{text}'")
+                response = await client.chat(
+                    model=self.llm_model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = response["message"]["content"]
+                logger.info(f"LLM response: {content}")
+                result = self._extract_json(content)
+            except Exception as e:
+                logger.error(f"LLM inference failed: {e}. Falling back to top semantic match.")
+                lang = await future_lang
+                best = top_matches[0]
+                return best["intent"]["name"], best["score"], lang
+
+            intent_name = result.get("name", top_matches[0]["intent"]["name"])
+            llm_confidence = float(result.get("confidence", 0.5))
 
         # 9. Confidence blend: mix LLM confidence with top retrieval similarity.
         #    Grounds the score in empirical evidence — if retrieval is weak, the
